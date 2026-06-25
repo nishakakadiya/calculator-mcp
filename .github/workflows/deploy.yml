@@ -1,0 +1,85 @@
+name: Build and Deploy to Cloud Run
+
+on:
+  push:
+    branches:
+      - main
+
+env:
+  PROJECT_ID: mcp-calculator-500503
+  REGION: australia-southeast1
+  REPOSITORY: mcp-repo
+  SERVICE_NAME: calculator-mcp
+  IMAGE_NAME: calculator-mcp
+
+jobs:
+  deploy:
+    name: Deploy to GCP
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # Required if using Workload Identity Federation
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      # ── Authenticate to Google Cloud ────────────────────────
+      # You can authenticate using a Service Account Key (simpler to set up)
+      # or Workload Identity Federation (more secure).
+      #
+      # To use Service Account Key:
+      # 1. Generate a JSON key for your Service Account.
+      # 2. Add it to GitHub repository secrets as `GCP_SA_KEY`.
+      #
+      # To use Workload Identity Federation:
+      # 1. Set up a Workload Identity Pool and Provider in GCP.
+      # 2. Uncomment the `workload_identity_provider` and `service_account` lines below.
+      # 3. Comment out the `credentials_json` line.
+      - name: Google Auth
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+          # workload_identity_provider: 'projects/YOUR_PROJECT_NUMBER/locations/global/workloadIdentityPools/YOUR_POOL/providers/YOUR_PROVIDER'
+          # service_account: 'YOUR_SERVICE_ACCOUNT_EMAIL'
+
+      # ── Set up Docker Buildx ────────────────────────────────
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # ── Authenticate Docker to Artifact Registry ────────────
+      - name: Docker Auth
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGION }}-docker.pkg.dev
+          username: _json_key
+          password: ${{ secrets.GCP_SA_KEY }}
+          # Note: If using Workload Identity, change password to: ${{ steps.auth.outputs.auth_token }}
+          # and username to: oauth2accesstoken
+
+      # ── Build and Push Container Image ──────────────────────
+      - name: Build and Push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+            ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.IMAGE_NAME }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # ── Deploy to Google Cloud Run ──────────────────────────
+      - name: Deploy to Cloud Run
+        id: deploy
+        uses: google-github-actions/deploy-cloudrun@v2
+        with:
+          service: ${{ env.SERVICE_NAME }}
+          region: ${{ env.REGION }}
+          image: ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+          flags: --allow-unauthenticated
+
+      # ── Show Output URL ─────────────────────────────────────
+      - name: Show URL
+        run: echo "Deployed to ${{ steps.deploy.outputs.url }}"
