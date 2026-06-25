@@ -1,5 +1,6 @@
+import { InMemoryEventStore } from "@modelcontextprotocol/sdk/examples/shared/inMemoryEventStore";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { NodeStreamableHTTPServerTransport } from '@modelcontextprotocol/node';
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { randomUUID } from "crypto";
 import express, { Request, Response } from "express";
@@ -104,59 +105,89 @@ function createServer() {
 
 // ── SSE Transport ──────────────────────────────────────
 
-const transports: Record<string, StreamableHTTPServerTransport> = {};
+// Map to store transports by session ID
+const transports: { [sessionId: string]: NodeStreamableHTTPServerTransport } = {};
 
-app.all("/mcp", async (req: Request, res: Response) => {
+// MCP POST endpoint with optional auth
+const mcpPostHandler = async (req: Request, res: Response) => {
+    const sessionId = req.headers['mcp-session-id'] as string | undefined;
+    if (sessionId) {
+        console.log(`Received MCP request for session: ${sessionId}`);
+    } else {
+        console.log('Request body:', req.body);
+    }
+
+
     try {
-        const sessionId = req.headers["mcp-session-id"] as string;
-        let transport: StreamableHTTPServerTransport;
-
+        let transport: NodeStreamableHTTPServerTransport;
         if (sessionId && transports[sessionId]) {
+            // Reuse existing transport
             transport = transports[sessionId];
-        } else if (!sessionId && req.method === "POST" && isInitializeRequest(req.body)) {
-            transport = new StreamableHTTPServerTransport({
+        } else if (!sessionId && isInitializeRequest(req.body)) {
+            // New initialization request
+            const eventStore = new InMemoryEventStore();
+            transport = new NodeStreamableHTTPServerTransport({
                 sessionIdGenerator: () => randomUUID(),
-                onsessioninitialized: (sid) => {
-                    transports[sid] = transport;
-                },
+                eventStore, // Enable resumability
+                onsessioninitialized: (sessionId: string | number) => {
+                    // Store the transport by session ID when session is initialized
+                    // This avoids race conditions where requests might come in before the session is stored
+                    console.log(`Session initialized with ID: ${sessionId}`);
+                    transports[sessionId] = transport;
+                }
             });
 
+            // Set up onclose handler to clean up transport when closed
             transport.onclose = () => {
                 const sid = transport.sessionId;
                 if (sid && transports[sid]) {
+                    console.log(`Transport closed for session ${sid}, removing from transports map`);
                     delete transports[sid];
                 }
             };
 
-            const serverInstance = createServer();
-            await serverInstance.connect(transport);
+            // Connect the transport to the MCP server BEFORE handling the request
+            // so responses can flow back through the same transport
+            const server = createServer();
+            await server.connect(transport);
+
+            await transport.handleRequest(req, res, req.body);
+            return; // Already handled
+        } else if (sessionId) {
+            res.status(404).json({
+                jsonrpc: '2.0',
+                error: { code: -32_001, message: 'Session not found' },
+                id: null
+            });
+            return;
         } else {
             res.status(400).json({
-                jsonrpc: "2.0",
-                error: {
-                    code: -32000,
-                    message: "Bad Request: No valid session ID provided",
-                },
-                id: null,
+                jsonrpc: '2.0',
+                error: { code: -32_000, message: 'Bad Request: Session ID required' },
+                id: null
             });
             return;
         }
 
+        // Handle the request with existing transport - no need to reconnect
+        // The existing transport is already connected to the server
         await transport.handleRequest(req, res, req.body);
     } catch (error) {
-        console.error("Error handling MCP request:", error);
+        console.error('Error handling MCP request:', error);
         if (!res.headersSent) {
             res.status(500).json({
-                jsonrpc: "2.0",
+                jsonrpc: '2.0',
                 error: {
-                    code: -32603,
-                    message: "Internal server error",
+                    code: -32_603,
+                    message: 'Internal server error'
                 },
-                id: null,
+                id: null
             });
         }
     }
-});
+};
+
+app.all("/mcp", mcpPostHandler);
 
 app.get("/health", (_req, res) => res.json({ status: "ok" }));
 
