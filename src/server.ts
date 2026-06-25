@@ -1,4 +1,4 @@
-import { InMemoryEventStore } from "@modelcontextprotocol/sdk/examples/shared/inMemoryEventStore";
+import { InMemoryEventStore } from "./inMemoryEventStore.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { NodeStreamableHTTPServerTransport } from '@modelcontextprotocol/node';
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
